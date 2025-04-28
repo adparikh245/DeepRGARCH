@@ -933,6 +933,7 @@ def get_garch_var(smc=None, Y=None):
     
     return garch_var
 
+
 #####################################
 # Helper Fn
 # def get_dataset(data, rvsup_ls=None, expand_dims=False, st=dt.datetime(2004,1,1), en=dt.datetime(2022,1,1), scale='None'):
@@ -1312,14 +1313,72 @@ realrech_2lstm_prior = dists.StructDist({'v0f': dists.Normal(0,.1),
                                         'beta1_rv': dists.Gamma(1,10)})
 # new t-dist one
 def realrech_2lstm_tdist_prior():
-    # Start with the base of the normal prior
-    theta = realrech_2lstm_prior()
-    
-    # Add or adjust parameters specific to t-distribution
-    theta['nu'] = dists.Gamma(2.0, 0.1)  # df for returns
-    theta['df_u'] = dists.Gamma(2.0, 0.1)  # df for realized volatility errors
-    
-    return theta
+    return dists.StructDist({
+        # Copy all parameters from realrech_2lstm_prior
+        'v0f': dists.Normal(0,.1),
+        'v1f': dists.Normal(0,.1),
+        'v2f': dists.Normal(0,.1),
+        'v3f': dists.Normal(0,.1),
+        'wf': dists.Normal(0,.1),
+        'bf': dists.Normal(0,.1),
+        'v0i': dists.Normal(0,.1),
+        'v1i': dists.Normal(0,.1),
+        'v2i': dists.Normal(0,.1),
+        'v3i': dists.Normal(0,.1),
+        'wi': dists.Normal(0,.1),
+        'bi': dists.Normal(0,.1),
+        'v0o': dists.Normal(0,.1),
+        'v1o': dists.Normal(0,.1),
+        'v2o': dists.Normal(0,.1),
+        'v3o': dists.Normal(0,.1),
+        'wo': dists.Normal(0,.1),
+        'bo': dists.Normal(0,.1), 
+        'v0d': dists.Normal(0,.1),
+        'v1d': dists.Normal(0,.1),
+        'v2d': dists.Normal(0,.1),
+        'v3d': dists.Normal(0,.1),
+        'wd': dists.Normal(0,.1),
+        'bd': dists.Normal(0,.1),  
+        'beta0': dists.Gamma(1,.1),
+        'beta1': dists.Gamma(1,10),
+        'beta': dists.Uniform(0,1),                                   
+        'gamma': dists.Beta(2,5),
+        'xi': dists.Gamma(1,1),
+        'phi': dists.Gamma(1,1),
+        'tau1': dists.Normal(0,.1),
+        'tau2': dists.Normal(0,.1),
+        'sigmau2': dists.Gamma(1,5),
+        'v0f_rv': dists.Normal(0,.1),
+        'v1f_rv': dists.Normal(0,.1),
+        'v2f_rv': dists.Normal(0,.1),
+        'v3f_rv': dists.Normal(0,.1),
+        'wf_rv': dists.Normal(0,.1),
+        'bf_rv': dists.Normal(0,.1),
+        'v0i_rv': dists.Normal(0,.1),
+        'v1i_rv': dists.Normal(0,.1),
+        'v2i_rv': dists.Normal(0,.1),
+        'v3i_rv': dists.Normal(0,.1),
+        'wi_rv': dists.Normal(0,.1),
+        'bi_rv': dists.Normal(0,.1),
+        'v0o_rv': dists.Normal(0,.1),
+        'v1o_rv': dists.Normal(0,.1),
+        'v2o_rv': dists.Normal(0,.1),
+        'v3o_rv': dists.Normal(0,.1),
+        'wo_rv': dists.Normal(0,.1),
+        'bo_rv': dists.Normal(0,.1), 
+        'v0d_rv': dists.Normal(0,.1),
+        'v1d_rv': dists.Normal(0,.1),
+        'v2d_rv': dists.Normal(0,.1),
+        'v3d_rv': dists.Normal(0,.1),
+        'wd_rv': dists.Normal(0,.1),
+        'bd_rv': dists.Normal(0,.1),  
+        'beta0_rv': dists.Gamma(1,.1),
+        'beta1_rv': dists.Gamma(1,10),
+        
+        # Add t-distribution parameters
+        'nu': dists.Gamma(2.0, 0.1),  # df for returns
+        'df_u': dists.Gamma(2.0, 0.1)  # df for realized variance
+    })
 
 def realrech_5h_prior(n):
     return dists.StructDist({'beta': dists.Uniform(0,1),                                     

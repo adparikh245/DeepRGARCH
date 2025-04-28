@@ -154,7 +154,7 @@ class SMC(object):
                  verbose=True, #False
                  N=10, #1000                
                  len_chain=10, #30
-                 ESSrmin_=0.5, # for adaptvie termpering - 0.9
+                 ESSrmin_=0.9, # for adaptvie termpering - 0.9
                  mcmc=None,
                  resampling="systematic",
                  tdist=False,

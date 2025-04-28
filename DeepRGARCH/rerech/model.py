@@ -1840,42 +1840,88 @@ class RealRECH_2LSTM_tdist(smc.SMC):
         llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
         return llik_y
     
-    def reweight_particles(self):
-        # calculate new epn
-        ESSmin = self.ESSrmin_ * self.X.N
-        f = lambda e: rs.essl(e * self.X.llik) - ESSmin
-        epn = self.X.shared['exponents'][-1]
-        if f(1. - epn) > 0:  # we're done (last iteration)
-            delta = 1. - epn
-            new_epn = 1. # set 1. manually so that we can safely test == 1.
-        else:
-            delta = sp.optimize.brentq(f, 1.e-12, 1. - epn)  # secant search
-            # left endpoint is >0, since f(0.) = nan if any likelihood = -inf
-            new_epn = epn + delta
-        self.X.shared['exponents'].append(new_epn)
-        # calculate delta llik
-        dllik = delta * self.X.llik
-        self.X.lpost += dllik
-        #update weights
-        self.wgts = self.wgts.add(dllik)
-        self.wgts_ = rs.Weights(delta*self.loglik_(self.X.theta))
+    # def reweight_particles(self):
+    #     # calculate new epn
+    #     ESSmin = self.ESSrmin_ * self.X.N
+    #     f = lambda e: rs.essl(e * self.X.llik) - ESSmin
+    #     epn = self.X.shared['exponents'][-1]
+    #     if f(1. - epn) > 0:  # we're done (last iteration)
+    #         delta = 1. - epn
+    #         new_epn = 1. # set 1. manually so that we can safely test == 1.
+    #     else:
+    #         delta = sp.optimize.brentq(f, 1.e-12, 1. - epn)  # secant search
+    #         # left endpoint is >0, since f(0.) = nan if any likelihood = -inf
+    #         new_epn = epn + delta
+    #     self.X.shared['exponents'].append(new_epn)
+    #     # calculate delta llik
+    #     dllik = delta * self.X.llik
+    #     self.X.lpost += dllik
+    #     #update weights
+    #     self.wgts = self.wgts.add(dllik)
+    #     self.wgts_ = rs.Weights(delta*self.loglik_(self.X.theta))
         
+    # def __next__(self):
+    #     if self.done():
+    #         self.loglik(self.X.theta, get_v=True)
+    #         self.var_ls = np.array(self.var_ls)
+    #         self.w_ls = np.array(self.w_ls)
+    #         raise StopIteration
+    #     if self.t == 0:
+    #         self.generate_particles()
+    #     else:
+    #         self.resample_move()
+    #     self.reweight_particles()
+    #     self.wgts_ls.append(self.wgts_)
+    #     self.X_ls.append(self.X)
+    #     if self.verbose:
+    #         print("t={}, accept_rate={:.2f}, accept_rate2={:.2f}, epn={:.3f}".format(self.t, np.average(self.X.shared['acc_rates'][-1]),self.X.shared['acc_rates2'][-1],self.X.shared['exponents'][-1]))
+    #     self.t += 1
+
+
+class RealRECH_2LSTM_tdist(smc.SMC):
+    # … your __init__, loglik, loglik_, etc. …
+
+    def reweight_particles(self):
+        # 1) do all of the SMC tempering magic (advances exponents, lpost, self.wgts)
+        super().reweight_particles()
+
+        # 2) clamp the exponent if it's numerically within 1e-8 of 1.0
+        exps = self.X.shared['exponents']
+        if exps[-1] > 1.0 - 1e-8:
+            exps[-1] = 1.0
+
+        # 3) compute your secondary weights from the small‐likelihood
+        delta = exps[-1] - exps[-2] if len(exps) > 1 else exps[-1]
+        self.wgts_ = rs.Weights(delta * self.loglik_(self.X.theta))
+
     def __next__(self):
-        if self.done():
-            self.loglik(self.X.theta, get_v=True)
+        # right up front, stop as soon as we're fully tempered
+        if self.X is not None and self.X.shared['exponents'][-1] >= 1.0:
+            # finalize any stored series
             self.var_ls = np.array(self.var_ls)
-            self.w_ls = np.array(self.w_ls)
+            self.w_ls   = np.array(self.w_ls)
             raise StopIteration
+
+        # otherwise, exactly one SMC iteration:
         if self.t == 0:
             self.generate_particles()
         else:
             self.resample_move()
+
         self.reweight_particles()
         self.wgts_ls.append(self.wgts_)
         self.X_ls.append(self.X)
+
         if self.verbose:
-            print("t={}, accept_rate={:.2f}, accept_rate2={:.2f}, epn={:.3f}".format(self.t, np.average(self.X.shared['acc_rates'][-1]),self.X.shared['acc_rates2'][-1],self.X.shared['exponents'][-1]))
+            epn = self.X.shared['exponents'][-1]
+            ar1 = np.average(self.X.shared['acc_rates'][-1])
+            ar2 = self.X.shared['acc_rates2'][-1]
+            print(f"t={self.t}, accept_rate={ar1:.2f}, accept_rate2={ar2:.2f}, epn={epn:.6f}")
+
         self.t += 1
+        # __next__ must return something, but run() ignores it
+        return self
+
 class RealRECHD_2LSTM_tdist(smc.SMCD):  
     def __init__(self,data=None, **kwargs):
         super().__init__(**kwargs)
@@ -1948,7 +1994,7 @@ class RealRECHD_2LSTM_tdist(smc.SMCD):
             #
             # llik_y = np.sum(stats.t.logpdf(self.Y[1:], df=df_y, loc=0, scale=np.sqrt(var[1:])), axis=0)
             # llik_rv = np.sum(stats.t.logpdf(U[1:], df=df_u, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)
-            llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
+            llik_y = np.sum(self.safe_logpdf_t(Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
             llik_rv = np.sum(self.safe_logpdf_t(U[1:], df_u, 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
             v = np.average(var[-1]) if self.rs_flag else np.average(var[-1],weights=self.wgts.W) 
             w = np.average(omega[-1]) if self.rs_flag else np.average(omega[-1],weights=self.wgts.W) 
@@ -1958,7 +2004,7 @@ class RealRECHD_2LSTM_tdist(smc.SMCD):
             #
             # llik_y = np.sum(stats.t.logpdf(self.Y[1:], df=df_y, loc=0, scale=np.sqrt(var[1:])), axis=0)
             # llik_rv = np.sum(stats.t.logpdf(U[1:], df=df_u, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0) 
-            llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
+            llik_y = np.sum(self.safe_logpdf_t(Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
             llik_rv = np.sum(self.safe_logpdf_t(U[1:], df_u, 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
         return llik_y+llik_rv  
   
