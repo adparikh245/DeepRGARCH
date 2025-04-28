@@ -33,10 +33,27 @@ class ThetaParticles(object):
         """Returns a copy of the object."""
         fields = {k: v.copy() for k, v in self.dict_fields.items()}
         return self.__class__(shared=self.shared.copy(), **fields)
-
+    
+    # @classmethod
+    # def gen_concatenate(*arrays):
+    #     if len(arrays) == 0:
+    #         return None
+        
+    #     first = arrays[0]
+        
+    #     if isinstance(first, np.ndarray):
+    #         return np.concatenate(arrays)
+    #     elif isinstance(first, list):
+    #         return sum(arrays, [])  # Concatenate lists
+    #     elif hasattr(first, 'concatenate'):
+    #         # For objects that have their own concatenate method
+    #         return first.__class__.concatenate(*arrays)
+    #     else:
+    #         # Default fallback - just return the first element
+    #         return first
     @classmethod
     def concatenate(cls, *xs):
-        fields = {k: gen_concatenate(*[getattr(x, k) for x in xs])
+        fields = {k: cls.gen_concatenate(*[getattr(x, k) for x in xs])
                   for k in xs[0].dict_fields.keys()}
         return cls(shared=xs[0].shared.copy(), **fields)
 
@@ -134,10 +151,10 @@ class SMC(object):
                  prior=None,
                  data=None,
                  cstr_fn=None,
-                 verbose=False,
-                 N=1000,                 
-                 len_chain=30,
-                 ESSrmin_=0.9, # for adaptvie termpering
+                 verbose=True, #False
+                 N=10, #1000                
+                 len_chain=10, #30
+                 ESSrmin_=0.5, # for adaptvie termpering - 0.9
                  mcmc=None,
                  resampling="systematic",
                  tdist=False,
@@ -261,8 +278,8 @@ class SMCD(object):
 
     def __init__(self,
                  verbose=False,            
-                 len_chain=30,
-                 ESSrmin=0.9, # for resampling
+                 len_chain=10, #30
+                 ESSrmin=0.5, # for resampling 0.9
                  mcmc=None,
                  resampling="systematic",
                  pre=None):

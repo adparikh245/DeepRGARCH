@@ -1,8 +1,11 @@
 import numpy as np
 import scipy as sp
-import sys
+import sys, os
+sys.path.append(os.path.abspath("/Users/ananyaparikh/Documents/Coding/DeepRGARCH/DeepRGARCH"))
 from scipy import stats
 from rerech import smc, utils as ut, resampling as rs
+from rerech import model_patch
+
 
 ################################################################### 
 # GARCH
@@ -787,6 +790,32 @@ class RealRECH_2LSTM(smc.SMC):
         self.Y, self.RV = data
         self.T = self.Y.shape[0]
         self.wgts_ = rs.Weights()
+    def safe_sqrt(self, x):
+        return np.sqrt(np.maximum(x, 1e-10))
+        
+    def safe_logpdf_t(self, x, df, loc, scale):
+        scale = np.maximum(scale, 1e-10)
+        df = np.maximum(df, 2.1)
+        try:
+            return stats.t.logpdf(x, df, loc=loc, scale=scale)
+        except:
+            log_gamma_df_half = np.log(np.sqrt(np.pi)) + np.log(df / 2)
+            log_gamma_half_df_half = np.log(np.sqrt(np.pi * df))
+            log_pdf = log_gamma_half_df_half - log_gamma_df_half - 0.5 * np.log(df) - \
+                    np.log(scale) - ((df + 1) / 2) * np.log(1 + x**2 / df)
+            return log_pdf
+    def safe_logpdf_norm(self, x, loc, scale):
+        scale = np.maximum(scale, 1e-10)
+        z = (x - loc) / scale
+        z_safe = np.clip(z, -100, 100)
+        log_pdf = -0.5 * np.log(2 * np.pi) - np.log(scale) - 0.5 * (z_safe ** 2)
+        return log_pdf
+    # Add this to both classes in the model.py file
+    def calculate_variance(self, omega, beta, gamma, rv, var_prev):
+        """Calculate variance with safeguards against negative values"""
+        var_next = omega + beta * var_prev + gamma * rv
+        # Ensure variance is always positive
+        return np.maximum(1e-10, var_next)
     
     def loglik(self, theta, get_v=False):  
         N = self.Y.shape[0]
@@ -811,7 +840,8 @@ class RealRECH_2LSTM(smc.SMC):
             c[n+1] = gi*chat+gf*c[n]
             h[n+1] = go*np.tanh(c[n+1])
             omega[n+1] = ut.relu(theta['beta0']+theta['beta1']*h[n+1])
-            var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            # var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], self.RV[n], var[n])
             
             eps = self.Y[n+1]/var[n+1]
             gf = ut.sigmoid(theta['v0f_rv']*xi[n]+theta['v1f_rv']*self.Y[n]+theta['v2f_rv']*var[n]+theta['v3f_rv']*self.RV[n]+theta['wf_rv']*h_rv[n]+theta['bf_rv'])
@@ -823,8 +853,10 @@ class RealRECH_2LSTM(smc.SMC):
             xi[n+1] = ut.relu(theta['beta0_rv']+theta['beta1_rv']*h_rv[n+1])
             U[n+1] = self.RV[n+1] - xi[n+1] - theta['phi']*var[n+1]-theta['tau1']*eps-theta['tau2']*(np.square(eps)-1)
 
-        llik_y = np.sum(stats.norm.logpdf(self.Y[1:], loc=0, scale=np.sqrt(var[1:])), axis=0)  
-        llik_rv = np.sum(stats.norm.logpdf(U[1:], loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)
+        # llik_y = np.sum(stats.norm.logpdf(self.Y[1:], loc=0, scale=np.sqrt(var[1:])), axis=0)  
+        # llik_rv = np.sum(stats.norm.logpdf(U[1:], loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)
+        llik_y = np.sum(self.safe_logpdf_norm(self.Y[1:], 0, self.safe_sqrt(var[1:])), axis=0)
+        llik_rv = np.sum(self.safe_logpdf_norm(U[1:], 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
         if get_v:
             self.var_ls = np.average(var[1:], axis=1, weights=self.wgts.W)
             self.w_ls = list(np.average(omega[1:], axis=1, weights=self.wgts.W))
@@ -847,9 +879,11 @@ class RealRECH_2LSTM(smc.SMC):
             c[n+1] = gi*chat+gf*c[n]
             h[n+1] = go*np.tanh(c[n+1])
             omega[n+1] = ut.relu(theta['beta0']+theta['beta1']*h[n+1])
-            var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            # var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], self.RV[n], var[n])
 
-        llik_y = np.sum(stats.norm.logpdf(self.Y[1:], loc=0, scale=np.sqrt(var[1:])), axis=0)  
+        #llik_y = np.sum(stats.norm.logpdf(self.Y[1:], loc=0, scale=np.sqrt(var[1:])), axis=0)
+        llik_y = np.sum(self.safe_logpdf_norm(self.Y[1:], 0, self.safe_sqrt(var[1:])), axis=0)  
         return llik_y
     
     def reweight_particles(self):
@@ -888,12 +922,24 @@ class RealRECH_2LSTM(smc.SMC):
         if self.verbose:
             print("t={}, accept_rate={:.2f}, accept_rate2={:.2f}, epn={:.3f}".format(self.t, np.average(self.X.shared['acc_rates'][-1]),self.X.shared['acc_rates2'][-1],self.X.shared['exponents'][-1]))
         self.t += 1
+    
 class RealRECHD_2LSTM(smc.SMCD):  
     def __init__(self,data=None, **kwargs):
         super().__init__(**kwargs)
         self.Y_train, self.Y_test, self.RV_train, self.RV_test = data
         self.T = self.Y_test.shape[0]
-        
+    def safe_sqrt(self, x):
+        return np.sqrt(np.maximum(x, 1e-10))
+    def calculate_variance(self, omega, beta, gamma, rv, var_prev):
+        var_next = omega + beta * var_prev + gamma * rv
+        # Ensure variance is always positive
+        return np.maximum(1e-10, var_next)     
+    def safe_logpdf_norm(self, x, loc, scale):
+        scale = np.maximum(scale, 1e-10)
+        z = (x - loc) / scale
+        z_safe = np.clip(z, -100, 100)
+        log_pdf = -0.5 * np.log(2 * np.pi) - np.log(scale) - 0.5 * (z_safe ** 2)
+        return log_pdf    
     def loglik(self, theta, t=None, lpyt=False): 
         Y = np.concatenate((self.Y_train, self.Y_test[:t+1]))
         RV= np.concatenate((self.RV_train, self.RV_test[:t+1]))
@@ -919,7 +965,8 @@ class RealRECHD_2LSTM(smc.SMCD):
             c[n+1] = gi*chat+gf*c[n]
             h[n+1] = go*np.tanh(c[n+1])
             omega[n+1] = ut.relu(theta['beta0']+theta['beta1']*h[n+1])
-            var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*RV[n]
+            # var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], RV[n], var[n])
             
             eps = Y[n+1]/var[n+1]
             gf = ut.sigmoid(theta['v0f_rv']*xi[n]+theta['v1f_rv']*Y[n]+theta['v2f_rv']*var[n]+theta['v3f_rv']*RV[n]+theta['wf_rv']*h_rv[n]+theta['bf_rv'])
@@ -940,8 +987,10 @@ class RealRECHD_2LSTM(smc.SMCD):
             self.var_ls.append(v) 
             self.w_ls.append(w)       
         else:
-            llik_y = np.sum(stats.norm.logpdf(Y, loc=0, scale=np.sqrt(var)), axis=0)  
-            llik_rv = np.sum(stats.norm.logpdf(U, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)  
+            # llik_y = np.sum(stats.norm.logpdf(Y, loc=0, scale=np.sqrt(var)), axis=0)  
+            # llik_rv = np.sum(stats.norm.logpdf(U, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)
+            llik_y = np.sum(self.safe_logpdf_norm(Y[1:], 0, self.safe_sqrt(var[1:])), axis=0)
+            llik_rv = np.sum(self.safe_logpdf_norm(U[1:], 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
         return llik_y+llik_rv  
 
 class Res:
@@ -953,7 +1002,12 @@ class RealRECHD_MultiPeriod(smc.SMCD):
         self.Y_train, self.Y_test, self.RV_train, self.RV_test = data
         self.T = self.Y_test.shape[0]
         self.Res = Res()
-        
+    # Add this to both classes in the model.py file
+    def calculate_variance(self, omega, beta, gamma, rv, var_prev):
+        """Calculate variance with safeguards against negative values"""
+        var_next = omega + beta * var_prev + gamma * rv
+        # Ensure variance is always positive
+        return np.maximum(1e-10, var_next)    
     def loglik(self, theta, t=None, lpyt=False): 
         Y = np.concatenate((self.Y_train, self.Y_test[:t+1]))
         RV= np.concatenate((self.RV_train, self.RV_test[:t+1]))
@@ -972,7 +1026,8 @@ class RealRECHD_MultiPeriod(smc.SMCD):
             c[n+1] = gi*chat+gf*c[n]
             h[n+1] = go*np.tanh(c[n+1])
             omega[n+1] = theta['beta0']+theta['beta1']*h[n+1]
-            var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*RV[n]  
+            #var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], self.RV[n], var[n])  
         eps = Y/np.sqrt(var)
         U   = RV - theta['xi']-theta['phi']*var-theta['tau1']*eps-theta['tau2']*(np.square(eps)-1)
         if lpyt:
@@ -1087,7 +1142,8 @@ class RealRECH_1x(smc.SMC):
             c[n+1] = gi*chat+gf*c[n]
             h[n+1] = go*np.tanh(c[n+1])
             omega[n+1] = theta['beta0']+theta['beta1']*h[n+1]
-            var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            # var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], self.RV[n], var[n])
         eps = self.Y/np.sqrt(var)
         U   = self.RV - theta['xi'] - theta['phi']*var-theta['tau1']*eps-theta['tau2']*(np.square(eps)-1)
         llik_y = np.sum(stats.norm.logpdf(self.Y[1:], loc=0, scale=np.sqrt(var[1:])), axis=0)  
@@ -1676,4 +1732,233 @@ class RealERECHD(smc.SMCD):
         else:
             llik_y = np.sum(stats.norm.logpdf(Y, loc=0, scale=np.sqrt(var)), axis=0)  
             llik_rv = np.sum(stats.norm.logpdf(U, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)  
-        return llik_y+llik_rv       
+        return llik_y+llik_rv     
+    
+################################################################### 
+# new class with t-dist for the 2LSTM Model
+class RealRECH_2LSTM_tdist(smc.SMC):  
+    def __init__(self,data=None, **kwargs):
+        super().__init__(**kwargs)
+        self.Y, self.RV = data
+        self.T = self.Y.shape[0]
+        self.wgts_ = rs.Weights()
+    def safe_sqrt(self, x):
+        return np.sqrt(np.maximum(x, 1e-10))
+        
+    def safe_logpdf_t(self, x, df, loc, scale):
+        scale = np.maximum(scale, 1e-10)
+        df = np.maximum(df, 2.1)
+        z = (x - loc) / scale
+        z_safe = np.clip(z, -100, 100)
+        try:
+            log_pdf = stats.t.logpdf(z_safe, df) - np.log(scale)
+            return log_pdf
+        except:
+            # Fallback calculation
+            log_gamma_df_half = np.log(np.sqrt(np.pi)) + np.log(df / 2)
+            log_gamma_half_df_half = np.log(np.sqrt(np.pi * df))
+            log_pdf = log_gamma_half_df_half - log_gamma_df_half - 0.5 * np.log(df) - \
+                     np.log(scale) - ((df + 1) / 2) * np.log(1 + z_safe**2 / df)
+            return log_pdf
+    # Add this to both classes in the model.py file
+    def calculate_variance(self, omega, beta, gamma, rv, var_prev):
+        """Calculate variance with safeguards against negative values"""
+        var_next = omega + beta * var_prev + gamma * rv
+        # Ensure variance is always positive
+        return np.maximum(1e-10, var_next)
+    
+    def loglik(self, theta, get_v=False):  
+        df_y = theta['nu']
+        df_u = theta['df_u']
+        N = self.Y.shape[0]
+        var    = np.zeros((N, theta.shape[0]))
+        var[0] = np.var(self.Y)
+        omega = np.zeros((N, theta.shape[0]))
+        omega[0] = theta['beta0'] # + theta['beta1'] * h0 which is 0 
+        h = np.zeros((N, theta.shape[0]))
+        c = np.zeros((N, theta.shape[0]))# h0 = 0
+        
+        U  = np.zeros((self.Y.shape[0], theta.shape[0]))
+        xi = np.zeros((self.Y.shape[0], theta.shape[0]))
+        xi[0] = theta['xi'] # + theta['beta1'] * h0 which is 0 
+        h_rv = np.zeros((self.Y.shape[0], theta.shape[0]))
+        c_rv = np.zeros((self.Y.shape[0], theta.shape[0]))
+        
+        for n in range(self.Y.shape[0]-1):  #yt generate std t+1, while we don't need t+1
+            gf = ut.sigmoid(theta['v0f']*omega[n]+theta['v1f']*self.Y[n]+theta['v2f']*var[n]+theta['v3f']*self.RV[n]+theta['wf']*h[n]+theta['bf'])
+            gi = ut.sigmoid(theta['v0i']*omega[n]+theta['v1i']*self.Y[n]+theta['v2i']*var[n]+theta['v3i']*self.RV[n]+theta['wi']*h[n]+theta['bi'])
+            go = ut.sigmoid(theta['v0o']*omega[n]+theta['v1o']*self.Y[n]+theta['v2o']*var[n]+theta['v3o']*self.RV[n]+theta['wo']*h[n]+theta['bo'])         
+            chat =  np.tanh(theta['v0d']*omega[n]+theta['v1d']*self.Y[n]+theta['v2d']*var[n]+theta['v3d']*self.RV[n]+theta['wd']*h[n]+theta['bd'])         
+            c[n+1] = gi*chat+gf*c[n]
+            h[n+1] = go*np.tanh(c[n+1])
+            omega[n+1] = ut.relu(theta['beta0']+theta['beta1']*h[n+1])
+            #var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], self.RV[n], var[n])
+            
+            eps = self.Y[n+1]/var[n+1]
+            gf = ut.sigmoid(theta['v0f_rv']*xi[n]+theta['v1f_rv']*self.Y[n]+theta['v2f_rv']*var[n]+theta['v3f_rv']*self.RV[n]+theta['wf_rv']*h_rv[n]+theta['bf_rv'])
+            gi = ut.sigmoid(theta['v0i_rv']*xi[n]+theta['v1i_rv']*self.Y[n]+theta['v2i_rv']*var[n]+theta['v3i_rv']*self.RV[n]+theta['wi_rv']*h_rv[n]+theta['bi_rv'])
+            go = ut.sigmoid(theta['v0o_rv']*xi[n]+theta['v1o_rv']*self.Y[n]+theta['v2o_rv']*var[n]+theta['v3o_rv']*self.RV[n]+theta['wo_rv']*h_rv[n]+theta['bo_rv'])         
+            chat =  np.tanh(theta['v0d_rv']*xi[n]+theta['v1d_rv']*self.Y[n]+theta['v2d_rv']*var[n]+theta['v3d_rv']*self.RV[n]+theta['wd_rv']*h_rv[n]+theta['bd_rv'])         
+            c_rv[n+1] = gi*chat+gf*c_rv[n]
+            h_rv[n+1] = go*np.tanh(c_rv[n+1])
+            xi[n+1] = ut.relu(theta['beta0_rv']+theta['beta1_rv']*h_rv[n+1])
+            U[n+1] = self.RV[n+1] - xi[n+1] - theta['phi']*var[n+1]-theta['tau1']*eps-theta['tau2']*(np.square(eps)-1)
+            #
+        # llik_y = np.sum(stats.t.logpdf(self.Y[1:], df=df_y, loc=0, scale=np.sqrt(var[1:])), axis=0)
+        # llik_rv = np.sum(stats.t.logpdf(U[1:], df=df_u, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)
+        llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
+        llik_rv = np.sum(self.safe_logpdf_t(U[1:], df_u, 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
+        if get_v:
+            self.var_ls = np.average(var[1:], axis=1, weights=self.wgts.W)
+            self.w_ls = list(np.average(omega[1:], axis=1, weights=self.wgts.W))
+        return llik_y+llik_rv #(N,) array
+    
+    def loglik_(self, theta, get_v=False):  
+        N = self.Y.shape[0]
+        var    = np.zeros((N, theta.shape[0]))
+        var[0] = np.var(self.Y)
+        omega = np.zeros((N, theta.shape[0]))
+        omega[0] = theta['beta0'] # + theta['beta1'] * h0 which is 0 
+        h = np.zeros((N, theta.shape[0]))
+        c = np.zeros((N, theta.shape[0]))# h0 = 0
+        
+        for n in range(self.Y.shape[0]-1):  #yt generate std t+1, while we don't need t+1
+            gf = ut.sigmoid(theta['v0f']*omega[n]+theta['v1f']*self.Y[n]+theta['v2f']*var[n]+theta['v3f']*self.RV[n]+theta['wf']*h[n]+theta['bf'])
+            gi = ut.sigmoid(theta['v0i']*omega[n]+theta['v1i']*self.Y[n]+theta['v2i']*var[n]+theta['v3i']*self.RV[n]+theta['wi']*h[n]+theta['bi'])
+            go = ut.sigmoid(theta['v0o']*omega[n]+theta['v1o']*self.Y[n]+theta['v2o']*var[n]+theta['v3o']*self.RV[n]+theta['wo']*h[n]+theta['bo'])         
+            chat =  np.tanh(theta['v0d']*omega[n]+theta['v1d']*self.Y[n]+theta['v2d']*var[n]+theta['v3d']*self.RV[n]+theta['wd']*h[n]+theta['bd'])         
+            c[n+1] = gi*chat+gf*c[n]
+            h[n+1] = go*np.tanh(c[n+1])
+            omega[n+1] = ut.relu(theta['beta0']+theta['beta1']*h[n+1])
+            # var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*self.RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], self.RV[n], var[n])
+
+
+        df_y = theta['nu']
+        #llik_y = np.sum(stats.t.logpdf(self.Y[1:], df=df_y, loc=0, scale=np.sqrt(var[1:])), axis=0)
+        llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
+        return llik_y
+    
+    def reweight_particles(self):
+        # calculate new epn
+        ESSmin = self.ESSrmin_ * self.X.N
+        f = lambda e: rs.essl(e * self.X.llik) - ESSmin
+        epn = self.X.shared['exponents'][-1]
+        if f(1. - epn) > 0:  # we're done (last iteration)
+            delta = 1. - epn
+            new_epn = 1. # set 1. manually so that we can safely test == 1.
+        else:
+            delta = sp.optimize.brentq(f, 1.e-12, 1. - epn)  # secant search
+            # left endpoint is >0, since f(0.) = nan if any likelihood = -inf
+            new_epn = epn + delta
+        self.X.shared['exponents'].append(new_epn)
+        # calculate delta llik
+        dllik = delta * self.X.llik
+        self.X.lpost += dllik
+        #update weights
+        self.wgts = self.wgts.add(dllik)
+        self.wgts_ = rs.Weights(delta*self.loglik_(self.X.theta))
+        
+    def __next__(self):
+        if self.done():
+            self.loglik(self.X.theta, get_v=True)
+            self.var_ls = np.array(self.var_ls)
+            self.w_ls = np.array(self.w_ls)
+            raise StopIteration
+        if self.t == 0:
+            self.generate_particles()
+        else:
+            self.resample_move()
+        self.reweight_particles()
+        self.wgts_ls.append(self.wgts_)
+        self.X_ls.append(self.X)
+        if self.verbose:
+            print("t={}, accept_rate={:.2f}, accept_rate2={:.2f}, epn={:.3f}".format(self.t, np.average(self.X.shared['acc_rates'][-1]),self.X.shared['acc_rates2'][-1],self.X.shared['exponents'][-1]))
+        self.t += 1
+class RealRECHD_2LSTM_tdist(smc.SMCD):  
+    def __init__(self,data=None, **kwargs):
+        super().__init__(**kwargs)
+        self.Y_train, self.Y_test, self.RV_train, self.RV_test = data
+        self.T = self.Y_test.shape[0]
+    def calculate_variance(self, omega, beta, gamma, rv, var_prev):
+        var_next = omega + beta * var_prev + gamma * rv
+        # Ensure variance is always positive
+        return np.maximum(1e-10, var_next) 
+    def safe_sqrt(self, x):
+        return np.sqrt(np.maximum(x, 1e-10))
+        
+    def safe_logpdf_t(self, x, df, loc, scale):
+        scale = np.maximum(scale, 1e-10)
+        df = np.maximum(df, 2.1)
+        z = (x - loc) / scale
+        z_safe = np.clip(z, -100, 100)
+        try:
+            log_pdf = stats.t.logpdf(z_safe, df) - np.log(scale)
+            return log_pdf
+        except:
+            # Fallback calculation
+            log_gamma_df_half = np.log(np.sqrt(np.pi)) + np.log(df / 2)
+            log_gamma_half_df_half = np.log(np.sqrt(np.pi * df))
+            log_pdf = log_gamma_half_df_half - log_gamma_df_half - 0.5 * np.log(df) - \
+                     np.log(scale) - ((df + 1) / 2) * np.log(1 + z_safe**2 / df)
+            return log_pdf
+    def loglik(self, theta, t=None, lpyt=False): 
+        df_y = theta['nu']
+        df_u = theta['df_u']
+        Y = np.concatenate((self.Y_train, self.Y_test[:t+1]))
+        RV= np.concatenate((self.RV_train, self.RV_test[:t+1]))
+        N = Y.shape[0]
+        var    = np.zeros((N, theta.shape[0]))
+        var[0] = np.var(Y)
+        omega = np.zeros((N, theta.shape[0]))
+        omega[0] = theta['beta0'] # + theta['beta1'] * h0 which is 0 
+        h = np.zeros((N, theta.shape[0]))
+        c = np.zeros((N, theta.shape[0]))# h0 = 0
+
+        U  = np.zeros((Y.shape[0], theta.shape[0]))
+        xi = np.zeros((Y.shape[0], theta.shape[0]))
+        xi[0] = theta['xi'] # + theta['beta1'] * h0 which is 0 
+        h_rv = np.zeros((Y.shape[0], theta.shape[0]))
+        c_rv = np.zeros((Y.shape[0], theta.shape[0]))
+        
+        for n in range(Y.shape[0]-1):  #yt generate std t+1, while we don't need t+1
+            gf = ut.sigmoid(theta['v0f']*omega[n]+theta['v1f']*Y[n]+theta['v2f']*var[n]+theta['v3f']*RV[n]+theta['wf']*h[n]+theta['bf'])
+            gi = ut.sigmoid(theta['v0i']*omega[n]+theta['v1i']*Y[n]+theta['v2i']*var[n]+theta['v3i']*RV[n]+theta['wi']*h[n]+theta['bi'])
+            go = ut.sigmoid(theta['v0o']*omega[n]+theta['v1o']*Y[n]+theta['v2o']*var[n]+theta['v3o']*RV[n]+theta['wo']*h[n]+theta['bo'])         
+            chat =  np.tanh(theta['v0d']*omega[n]+theta['v1d']*Y[n]+theta['v2d']*var[n]+theta['v3d']*RV[n]+theta['wd']*h[n]+theta['bd'])         
+            c[n+1] = gi*chat+gf*c[n]
+            h[n+1] = go*np.tanh(c[n+1])
+            omega[n+1] = ut.relu(theta['beta0']+theta['beta1']*h[n+1])
+            # var[n+1] = omega[n+1]+theta['beta']*var[n]+theta['gamma']*RV[n]
+            var[n+1] = self.calculate_variance(omega[n+1], theta['beta'], theta['gamma'], RV[n], var[n])
+
+            eps = Y[n+1]/var[n+1]
+            gf = ut.sigmoid(theta['v0f_rv']*xi[n]+theta['v1f_rv']*Y[n]+theta['v2f_rv']*var[n]+theta['v3f_rv']*RV[n]+theta['wf_rv']*h_rv[n]+theta['bf_rv'])
+            gi = ut.sigmoid(theta['v0i_rv']*xi[n]+theta['v1i_rv']*Y[n]+theta['v2i_rv']*var[n]+theta['v3i_rv']*RV[n]+theta['wi_rv']*h_rv[n]+theta['bi_rv'])
+            go = ut.sigmoid(theta['v0o_rv']*xi[n]+theta['v1o_rv']*Y[n]+theta['v2o_rv']*var[n]+theta['v3o_rv']*RV[n]+theta['wo_rv']*h_rv[n]+theta['bo_rv'])         
+            chat =  np.tanh(theta['v0d_rv']*xi[n]+theta['v1d_rv']*Y[n]+theta['v2d_rv']*var[n]+theta['v3d_rv']*RV[n]+theta['wd_rv']*h_rv[n]+theta['bd_rv'])           
+            c_rv[n+1] = gi*chat+gf*c_rv[n]
+            h_rv[n+1] = go*np.tanh(c_rv[n+1])
+            xi[n+1] = ut.relu(theta['beta0_rv']+theta['beta1_rv']*h_rv[n+1])
+            U[n+1] = RV[n+1] - xi[n+1] - theta['phi']*var[n+1]-theta['tau1']*eps-theta['tau2']*(np.square(eps)-1)
+
+        
+        if lpyt:
+            #
+            # llik_y = np.sum(stats.t.logpdf(self.Y[1:], df=df_y, loc=0, scale=np.sqrt(var[1:])), axis=0)
+            # llik_rv = np.sum(stats.t.logpdf(U[1:], df=df_u, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0)
+            llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
+            llik_rv = np.sum(self.safe_logpdf_t(U[1:], df_u, 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
+            v = np.average(var[-1]) if self.rs_flag else np.average(var[-1],weights=self.wgts.W) 
+            w = np.average(omega[-1]) if self.rs_flag else np.average(omega[-1],weights=self.wgts.W) 
+            self.var_ls.append(v) 
+            self.w_ls.append(w)       
+        else:
+            #
+            # llik_y = np.sum(stats.t.logpdf(self.Y[1:], df=df_y, loc=0, scale=np.sqrt(var[1:])), axis=0)
+            # llik_rv = np.sum(stats.t.logpdf(U[1:], df=df_u, loc=0, scale=np.sqrt(theta['sigmau2'])), axis=0) 
+            llik_y = np.sum(self.safe_logpdf_t(self.Y[1:], df_y, 0, self.safe_sqrt(var[1:])), axis=0)
+            llik_rv = np.sum(self.safe_logpdf_t(U[1:], df_u, 0, self.safe_sqrt(np.maximum(theta['sigmau2'], 1e-10))), axis=0)
+        return llik_y+llik_rv  
+  

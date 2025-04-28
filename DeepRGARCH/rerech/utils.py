@@ -826,31 +826,111 @@ def single_plot(smc):
                 weights=theta_wgts)
     ax.legend()
     
-def var_plot(var_ls=None):
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for var in var_ls:
-        ax.plot(var, label=nameof(var))
-    ax.legend()
+# def var_plot(var_ls=None):
+#     fig, ax = plt.subplots(figsize=(10, 5))
+#     for var in var_ls:
+#         ax.plot(var, label=nameof(var))
+#     ax.legend()
 
-def get_rech_var(smc, Y=None):
-    rech_var = np.zeros(Y.shape[0])
-    rech_var[0] = np.var(Y)
-    omega = np.zeros(Y.shape[0])
-    omega[0] = rech_w_mean['beta0']
-    h = np.zeros(Y.shape[0])
+# def get_rech_var(smc, Y=None):
+#     rech_var = np.zeros(Y.shape[0])
+#     rech_var[0] = np.var(Y)
+#     omega = np.zeros(Y.shape[0])
+#     omega[0] = rech_w_mean['beta0']
+#     h = np.zeros(Y.shape[0])
+#     theta_mean = get_theta_mean(smc)
+    
+#     for n in range(Y[:-1].shape[0]):
+#         h[n+1] = relu(theta_mean['v0'] * omega[n] + theta_mean['v1'] * Y[n] + theta_mean['v2'] * rech_var[n] + theta_mean['w'] * h[n] + theta_mean['b'])
+#         omega[n+1] = theta_mean['beta0'] + rech_w_mean['beta1'] * h[n+1]
+#         rech_var[n+1] = omega[n+1] + theta_mean['alpha'] * np.square(Y[n]) + theta_mean['beta'] * rech_var[n]
+#     return rech_var, omega
+
+# def get_garch_var(smc=None, Y=None):
+#     theta_mean = get_theta_mean(smc)
+#     garch_var = [np.var(Y)]
+#     for n, y in enumerate(Y[:-1]):
+#         garch_var.append(float(theta_mean['omega'] + theta_mean['alpha'] * np.square(y) + theta_mean['beta'] * garch_var[n]))
+#     return garch_var
+
+def var_plot(var_ls=None, names=None):
+    """Plot variance series with proper labels."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    if var_ls is None:
+        return fig
+    
+    # Use provided names or generate default names
+    if names is None:
+        names = [f"Series {i}" for i in range(len(var_ls))]
+    
+    for i, var in enumerate(var_ls):
+        ax.plot(var, label=names[i])
+    
+    ax.legend()
+    return fig
+
+def get_rech_var(smc, Y=None, rech_w_mean=None):
+    """Calculate variance estimates using RECH model with numerical safeguards."""
+    if Y is None or rech_w_mean is None:
+        raise ValueError("Y and rech_w_mean must be provided")
+        
+    # Get model parameters
     theta_mean = get_theta_mean(smc)
     
-    for n in range(Y[:-1].shape[0]):
-        h[n+1] = relu(theta_mean['v0'] * omega[n] + theta_mean['v1'] * Y[n] + theta_mean['v2'] * rech_var[n] + theta_mean['w'] * h[n] + theta_mean['b'])
-        omega[n+1] = theta_mean['beta0'] + rech_w_mean['beta1'] * h[n+1]
-        rech_var[n+1] = omega[n+1] + theta_mean['alpha'] * np.square(Y[n]) + theta_mean['beta'] * rech_var[n]
+    rech_var = np.zeros(Y.shape[0])
+    rech_var[0] = np.maximum(np.var(Y), 1e-10)  # Ensure positive initial variance
+    omega = np.zeros(Y.shape[0])
+    omega[0] = np.maximum(rech_w_mean['beta0'], 1e-10)  # Ensure positive omega
+    h = np.zeros(Y.shape[0])
+    
+    for n in range(Y.shape[0]-1):
+        # Clip inputs to relu to prevent overflow
+        relu_input = np.clip(
+            theta_mean['v0'] * omega[n] + 
+            theta_mean['v1'] * Y[n] + 
+            theta_mean['v2'] * rech_var[n] + 
+            theta_mean['w'] * h[n] + 
+            theta_mean['b'], 
+            -50, 50
+        )
+        
+        # Apply relu function safely
+        h[n+1] = np.maximum(0, relu_input)  # Simple implementation of relu
+        
+        # Calculate omega with protection against negative values
+        omega[n+1] = np.maximum(
+            theta_mean['beta0'] + rech_w_mean['beta1'] * h[n+1],
+            1e-10
+        )
+        
+        # Calculate variance with protection against negative values
+        rech_var[n+1] = np.maximum(
+            omega[n+1] + 
+            theta_mean['alpha'] * np.square(Y[n]) + 
+            theta_mean['beta'] * rech_var[n],
+            1e-10
+        )
+    
     return rech_var, omega
 
 def get_garch_var(smc=None, Y=None):
+    """Calculate variance estimates using GARCH model with numerical safeguards."""
+    if smc is None or Y is None:
+        raise ValueError("Both smc and Y must be provided")
+        
     theta_mean = get_theta_mean(smc)
-    garch_var = [np.var(Y)]
+    garch_var = [np.maximum(np.var(Y), 1e-10)]  # Ensure positive initial variance
+    
     for n, y in enumerate(Y[:-1]):
-        garch_var.append(float(theta_mean['omega'] + theta_mean['alpha'] * np.square(y) + theta_mean['beta'] * garch_var[n]))
+        # Calculate next variance with protection against negative values
+        next_var = np.maximum(
+            theta_mean['omega'] + 
+            theta_mean['alpha'] * np.square(y) + 
+            theta_mean['beta'] * garch_var[n],
+            1e-10
+        )
+        garch_var.append(float(next_var))
+    
     return garch_var
 
 #####################################
@@ -1229,7 +1309,17 @@ realrech_2lstm_prior = dists.StructDist({'v0f': dists.Normal(0,.1),
                                         'wd_rv': dists.Normal(0,.1),
                                         'bd_rv': dists.Normal(0,.1),  
                                         'beta0_rv': dists.Gamma(1,.1),
-                                        'beta1_rv': dists.Gamma(1,10),})
+                                        'beta1_rv': dists.Gamma(1,10)})
+# new t-dist one
+def realrech_2lstm_tdist_prior():
+    # Start with the base of the normal prior
+    theta = realrech_2lstm_prior()
+    
+    # Add or adjust parameters specific to t-distribution
+    theta['nu'] = dists.Gamma(2.0, 0.1)  # df for returns
+    theta['df_u'] = dists.Gamma(2.0, 0.1)  # df for realized volatility errors
+    
+    return theta
 
 def realrech_5h_prior(n):
     return dists.StructDist({'beta': dists.Uniform(0,1),                                     
