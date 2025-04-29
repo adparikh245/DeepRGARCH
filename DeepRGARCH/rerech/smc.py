@@ -4,36 +4,28 @@ from rerech import resampling as rs
 
 #####################################
 # Particles
-class ThetaParticles(object):
-
-    def __init__(self, shared=None, **fields):
-        self.shared = {} if shared is None else shared
-        self.__dict__.update(fields)
-
-    @property
-    def N(self):
-        return len(next(iter(self.dict_fields.values())))
-
-    @property
-    def dict_fields(self):
-        return {k: v for k, v in self.__dict__.items() if k != 'shared'}
-
-    def __getitem__(self, key):
-        fields = {k: v[key] for k, v in self.dict_fields.items()}
-        if isinstance(key, int):
-            return fields
-        else:
-            return self.__class__(shared=self.shared.copy(), **fields)
-
-    def __setitem__(self, key, value):
-        for k, v in self.dict_fields.item():
-            v[key] = getattr(value, k)
+class ThetaParticles:
+    """
+    Simple container for particles with log-prior, log-lik, log-post and annealing exponents.
+    """
+    def __init__(self, theta, shared=None):
+        # theta: structured array or dict-of-np.arrays, shape=(N_particles,)
+        self.theta = theta
+        self.N = theta.shape[0]
+        # log-prior, log-likelihood, log-posterior
+        self.lprior = np.zeros(self.N)
+        self.llik   = np.zeros(self.N)
+        self.lpost  = np.zeros(self.N)
+        # annealing exponents, accept rates
+        self.shared = {'exponents': [0.0], 'acc_rates': [0.0]} if shared is None else shared.copy()
 
     def copy(self):
-        """Returns a copy of the object."""
-        fields = {k: v.copy() for k, v in self.dict_fields.items()}
-        return self.__class__(shared=self.shared.copy(), **fields)
-    
+        out = ThetaParticles(self.theta.copy(), shared=self.shared.copy())
+        out.lprior = self.lprior.copy()
+        out.llik   = self.llik.copy()
+        out.lpost  = self.lpost.copy()
+        return out
+ 
     # @classmethod
     # def gen_concatenate(*arrays):
     #     if len(arrays) == 0:
@@ -199,33 +191,26 @@ class SMC(object):
 
     def generate_particles(self):
         N0 = self.N
-        if self.cstr_fn == None:
-            x0 = ThetaParticles(theta=self.prior.rvs(size=N0))
-        else:
-            theta = self.prior.rvs(size=N0)
-            theta = theta[self.cstr_fn(theta)]
-            n = theta.shape[0]
-            while n < N0:     
-                theta_p = self.prior.rvs(size=N0)
-                theta_p = theta_p[self.cstr_fn(theta_p)] 
-                theta = np.concatenate((theta, theta_p))
-                n+=theta_p.shape[0]
-            theta = theta[:N0]
-            x0 = ThetaParticles(theta=theta)
-        x0.shared['acc_rates2'] = [0.]
+        x0 = ThetaParticles(theta=self.pre.X.theta)
+        self.wgts = rs.Weights(lw=self.pre.wgts.lw)
         x0.shared['acc_rates'] = [0.]
+        x0.shared['acc_rates2'] = [0.]  # Make sure this is initialized
         x0.shared['exponents'] = [0.]
-        self.current_target(0.)(x0)
+        
+        # This line calculates and sets the llik attribute
+        self.current_target(-1)(x0)
+        
+        # Make sure these attributes are properly set
+        x0.lprior = self.prior.logpdf(x0.theta)
+        x0.llik = self.loglik(x0.theta)  # Explicitly set llik
+        x0.lpost = x0.lprior + x0.llik
+        
         self.X = x0
-
-    def current_target(self, epn): # # update lpost or return fn for calculate lpost
+    def current_target(self, t):
         def func(x):
             x.lprior = self.prior.logpdf(x.theta)
-            x.llik = self.loglik(x.theta)
-            if epn > 0.:
-                x.lpost = x.lprior + epn * x.llik
-            else:  # avoid having 0 x Nan
-                x.lpost = x.lprior.copy()
+            x.llik = self.loglik(x.theta, t)
+            x.lpost = x.lprior + x.llik
         return func
 
     def resample_move(self):
@@ -246,23 +231,34 @@ class SMC(object):
             self.Xp = self.X
 
     def reweight_particles(self):
-        # calculate new epn
-        ESSmin = self.ESSrmin_ * self.X.N
+        """
+        identical to base SMCD, but using our local loglik_ if needed
+        """
+        N = self.X.N
+        ESSmin = self.ESSrmin_ * N
+        
+        # Make sure llik exists, if not, calculate it
+        if not hasattr(self.X, 'llik'):
+            self.X.llik = self.loglik(self.X.theta)
+        
         f = lambda e: rs.essl(e * self.X.llik) - ESSmin
+
         epn = self.X.shared['exponents'][-1]
-        if f(1. - epn) > 0:  # we're done (last iteration)
+        if f(1. - epn) > 0:
             delta = 1. - epn
-            new_epn = 1. # set 1. manually so that we can safely test == 1.
+            new_epn = 1.
         else:
-            delta = sp.optimize.brentq(f, 1.e-12, 1. - epn)  # secant search
-            # left endpoint is >0, since f(0.) = nan if any likelihood = -inf
+            # Using sp.optimize.brentq instead of rs.brentq
+            delta = np.clip(
+                sp.optimize.brentq(f, 1e-12, 1. - epn),
+                1e-12, 1. - epn
+            )
             new_epn = epn + delta
+
         self.X.shared['exponents'].append(new_epn)
-        # calculate delta llik
         dllik = delta * self.X.llik
         self.X.lpost += dllik
-        #update weights
-        self.wgts = self.wgts.add(dllik)
+        self.wgts_ = rs.Weights(delta * self.loglik(self.X.theta))
 
     def __iter__(self):
         return self
@@ -279,7 +275,7 @@ class SMCD(object):
     def __init__(self,
                  verbose=False,            
                  len_chain=10, #30
-                 ESSrmin=0.5, # for resampling 0.9
+                 ESSrmin=0.9, # for resampling 0.9
                  mcmc=None,
                  resampling="systematic",
                  pre=None):
@@ -330,6 +326,7 @@ class SMCD(object):
         self.wgts = rs.Weights(lw=self.pre.wgts.lw)
         x0.shared['acc_rates'] = [0.]
         x0.shared['exponents'] = [0.]
+        x0.shared['acc_rates2']  = [0.0]
         self.current_target(-1)(x0)
         self.X = x0       
 
@@ -366,4 +363,3 @@ class SMCD(object):
     def run(self):
         for _ in self:
             pass
-
