@@ -4,10 +4,10 @@ import numpy as np
 import scipy.stats as stats
 import scipy as sp
 
-import rerech.utils as ut                  # unchanged helpers
-from rerech import distributions as dists  # prior building blocks
-import rerech.resampling as rs             # SMC weights / resampling
-from rerech.smc import SMC, SMCD          # original base classes
+import rerech.utils as ut                 
+from rerech import distributions as dists  
+import rerech.resampling as rs            
+from rerech.smc import SMC, SMCD         
 
 __all__ = [
     "make_multi_rv_prior",
@@ -15,9 +15,6 @@ __all__ = [
     "RealRECHD_2LSTM",
 ]
 
-# =====================================================================
-# 1.  PRIOR factory for K realised‑vol measures
-# =====================================================================
 
 def make_multi_rv_prior(K: int) -> dists.StructDist:
     """Return a StructDist with K‑vector realised‑vol parameters.
@@ -44,9 +41,6 @@ def make_multi_rv_prior(K: int) -> dists.StructDist:
         'sigmau2' : dists.IID(dists.Gamma(1, 5),   K),
     })
 
-# ---------------------------------------------------------------------
-# helper: gamma·RV for each particle
-# ---------------------------------------------------------------------
 
 def _gamma_dot_rv(gamma: np.ndarray, rv_row: np.ndarray) -> np.ndarray:
     """Compute \sum_k gamma_{p,k} * rv_{k,t} for every particle *p*.
@@ -56,10 +50,6 @@ def _gamma_dot_rv(gamma: np.ndarray, rv_row: np.ndarray) -> np.ndarray:
     Returns shape: (P,)
     """
     return np.einsum('pk,k->p', gamma, rv_row)
-
-# =====================================================================
-# 2.  In‑sample class with multi‑RV variance update
-# =====================================================================
 
 class RealRECH_2LSTM(SMC):
     """Multi‑RV version of the in‑sample SMC class (K realised measures).
@@ -83,9 +73,6 @@ class RealRECH_2LSTM(SMC):
         min_var = np.percentile(self.Y**2, 1)
         return np.maximum(min_var, omega + beta*var_prev + rv_dot)
 
-    # ------------------------------------------------------------------
-    #                         log‑likelihood
-    # ------------------------------------------------------------------
     def loglik(self, theta, get_v=False):
         N = self.T
         P = theta.shape[0]
@@ -97,18 +84,15 @@ class RealRECH_2LSTM(SMC):
         c      = np.zeros_like(var)
 
         for n in range(N-1):
-            # ---------- LSTM gates (unchanged, elided here) --------------
-            # ...
+            
             raw_w     = theta['beta0'] + theta['beta1'] * h[n+1]
             omega[n+1] = ut.relu(raw_w) * theta.get('ω_scale', 1.0)
 
-            # --------- *** multi‑RV variance update *** -----------------
             rv_dot    = _gamma_dot_rv(theta['gamma'], self.RV[n])   # (P,)
             var[n+1]  = self.calculate_variance(
                             omega[n+1], theta['beta'], 1.0,
                             rv_dot, var[n])
 
-        # original Gaussian likelihood on returns -------------------------
         llik_y = np.sum(stats.norm.logpdf(self.Y[1:], 0, self.safe_sqrt(var[1:])), 0)
         return llik_y
 
@@ -122,7 +106,6 @@ class RealRECHD_2LSTM(SMCD):
         super().__init__(data=data, **kwargs)
         self.T = self.Y_test.shape[0]
 
-    # helpers -------------------------------------------------------------
     @staticmethod
     def safe_sqrt(x):
         return np.sqrt(np.maximum(x, 1e-10))
@@ -131,7 +114,6 @@ class RealRECHD_2LSTM(SMCD):
         min_var = np.percentile(self.Y_train**2, 1)
         return np.maximum(min_var, omega + beta*var_prev + rv_dot)
 
-    # ------------------------------------------------------------------
     def loglik(self, theta, t=None, lpyt=False):
         # concatenate training + test up to t
         Y  = np.concatenate((self.Y_train, self.Y_test[:t+1]))
@@ -147,7 +129,6 @@ class RealRECHD_2LSTM(SMCD):
         c      = np.zeros_like(var)
 
         for n in range(N-1):
-            # LSTM gates ... (unchanged)
             raw_w      = theta['beta0'] + theta['beta1'] * h[n+1]
             omega[n+1] = ut.relu(raw_w) * theta.get('ω_scale', 1.0)
 
@@ -155,7 +136,7 @@ class RealRECHD_2LSTM(SMCD):
             var[n+1]   = self.calculate_variance(
                             omega[n+1], theta['beta'], 1.0,
                             rv_dot, var[n])
-            # measurement‑eqn for RV (unchanged) ...
+            
 
         llik_y = np.sum(stats.norm.logpdf(Y[1:], 0, self.safe_sqrt(var[1:])), 0)
         return llik_y
