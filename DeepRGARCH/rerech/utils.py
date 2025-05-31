@@ -826,32 +826,113 @@ def single_plot(smc):
                 weights=theta_wgts)
     ax.legend()
     
-def var_plot(var_ls=None):
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for var in var_ls:
-        ax.plot(var, label=nameof(var))
-    ax.legend()
+# def var_plot(var_ls=None):
+#     fig, ax = plt.subplots(figsize=(10, 5))
+#     for var in var_ls:
+#         ax.plot(var, label=nameof(var))
+#     ax.legend()
 
-def get_rech_var(smc, Y=None):
-    rech_var = np.zeros(Y.shape[0])
-    rech_var[0] = np.var(Y)
-    omega = np.zeros(Y.shape[0])
-    omega[0] = rech_w_mean['beta0']
-    h = np.zeros(Y.shape[0])
+# def get_rech_var(smc, Y=None):
+#     rech_var = np.zeros(Y.shape[0])
+#     rech_var[0] = np.var(Y)
+#     omega = np.zeros(Y.shape[0])
+#     omega[0] = rech_w_mean['beta0']
+#     h = np.zeros(Y.shape[0])
+#     theta_mean = get_theta_mean(smc)
+    
+#     for n in range(Y[:-1].shape[0]):
+#         h[n+1] = relu(theta_mean['v0'] * omega[n] + theta_mean['v1'] * Y[n] + theta_mean['v2'] * rech_var[n] + theta_mean['w'] * h[n] + theta_mean['b'])
+#         omega[n+1] = theta_mean['beta0'] + rech_w_mean['beta1'] * h[n+1]
+#         rech_var[n+1] = omega[n+1] + theta_mean['alpha'] * np.square(Y[n]) + theta_mean['beta'] * rech_var[n]
+#     return rech_var, omega
+
+# def get_garch_var(smc=None, Y=None):
+#     theta_mean = get_theta_mean(smc)
+#     garch_var = [np.var(Y)]
+#     for n, y in enumerate(Y[:-1]):
+#         garch_var.append(float(theta_mean['omega'] + theta_mean['alpha'] * np.square(y) + theta_mean['beta'] * garch_var[n]))
+#     return garch_var
+
+def var_plot(var_ls=None, names=None):
+    """Plot variance series with proper labels."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    if var_ls is None:
+        return fig
+    
+    # Use provided names or generate default names
+    if names is None:
+        names = [f"Series {i}" for i in range(len(var_ls))]
+    
+    for i, var in enumerate(var_ls):
+        ax.plot(var, label=names[i])
+    
+    ax.legend()
+    return fig
+
+def get_rech_var(smc, Y=None, rech_w_mean=None):
+    """Calculate variance estimates using RECH model with numerical safeguards."""
+    if Y is None or rech_w_mean is None:
+        raise ValueError("Y and rech_w_mean must be provided")
+        
+    # Get model parameters
     theta_mean = get_theta_mean(smc)
     
-    for n in range(Y[:-1].shape[0]):
-        h[n+1] = relu(theta_mean['v0'] * omega[n] + theta_mean['v1'] * Y[n] + theta_mean['v2'] * rech_var[n] + theta_mean['w'] * h[n] + theta_mean['b'])
-        omega[n+1] = theta_mean['beta0'] + rech_w_mean['beta1'] * h[n+1]
-        rech_var[n+1] = omega[n+1] + theta_mean['alpha'] * np.square(Y[n]) + theta_mean['beta'] * rech_var[n]
+    rech_var = np.zeros(Y.shape[0])
+    rech_var[0] = np.maximum(np.var(Y), 1e-10)  # Ensure positive initial variance
+    omega = np.zeros(Y.shape[0])
+    omega[0] = np.maximum(rech_w_mean['beta0'], 1e-10)  # Ensure positive omega
+    h = np.zeros(Y.shape[0])
+    
+    for n in range(Y.shape[0]-1):
+        # Clip inputs to relu to prevent overflow
+        relu_input = np.clip(
+            theta_mean['v0'] * omega[n] + 
+            theta_mean['v1'] * Y[n] + 
+            theta_mean['v2'] * rech_var[n] + 
+            theta_mean['w'] * h[n] + 
+            theta_mean['b'], 
+            -50, 50
+        )
+        
+        # Apply relu function safely
+        h[n+1] = np.maximum(0, relu_input)  # Simple implementation of relu
+        
+        # Calculate omega with protection against negative values
+        omega[n+1] = np.maximum(
+            theta_mean['beta0'] + rech_w_mean['beta1'] * h[n+1],
+            1e-10
+        )
+        
+        # Calculate variance with protection against negative values
+        rech_var[n+1] = np.maximum(
+            omega[n+1] + 
+            theta_mean['alpha'] * np.square(Y[n]) + 
+            theta_mean['beta'] * rech_var[n],
+            1e-10
+        )
+    
     return rech_var, omega
 
 def get_garch_var(smc=None, Y=None):
+    """Calculate variance estimates using GARCH model with numerical safeguards."""
+    if smc is None or Y is None:
+        raise ValueError("Both smc and Y must be provided")
+        
     theta_mean = get_theta_mean(smc)
-    garch_var = [np.var(Y)]
+    garch_var = [np.maximum(np.var(Y), 1e-10)]  # Ensure positive initial variance
+    
     for n, y in enumerate(Y[:-1]):
-        garch_var.append(float(theta_mean['omega'] + theta_mean['alpha'] * np.square(y) + theta_mean['beta'] * garch_var[n]))
+        # Calculate next variance with protection against negative values
+        next_var = np.maximum(
+            theta_mean['omega'] + 
+            theta_mean['alpha'] * np.square(y) + 
+            theta_mean['beta'] * garch_var[n],
+            1e-10
+        )
+        garch_var.append(float(next_var))
+    
     return garch_var
+
 
 #####################################
 # Helper Fn
@@ -1087,6 +1168,7 @@ realrech_1x_prior = dists.StructDist({'v0f': dists.Normal(0,.1),
                              'wd': dists.Normal(0,.1),
                              'bd': dists.Normal(0,.1),  
                              'beta0': dists.Gamma(1,.1),
+                             'beta0': dists.TruncatedNormal(0.0, 2.0, -8.0, 8.0),
                              'beta1': dists.Gamma(1,10),
                              'beta': dists.Uniform(0,1),                                     
                              'gamma': dists.Beta(2,5),
@@ -1195,8 +1277,10 @@ realrech_2lstm_prior = dists.StructDist({'v0f': dists.Normal(0,.1),
                                         'v3d': dists.Normal(0,.1),
                                         'wd': dists.Normal(0,.1),
                                         'bd': dists.Normal(0,.1),  
-                                        'beta0': dists.Gamma(1,.1),
-                                        'beta1': dists.Gamma(1,10),
+                                        #'beta0': dists.Gamma(1,.1),
+                                        'beta0': dists.TruncatedNormal(0.0, 2.0, -8.0, 8.0),
+                                        #'beta1': dists.Gamma(1,10),
+                                        'beta1': dists.Gamma(2, 5),
                                         'beta': dists.Uniform(0,1),                                   
                                         'gamma': dists.Beta(2,5),
                                         'xi': dists.Gamma(1,1),
@@ -1229,7 +1313,79 @@ realrech_2lstm_prior = dists.StructDist({'v0f': dists.Normal(0,.1),
                                         'wd_rv': dists.Normal(0,.1),
                                         'bd_rv': dists.Normal(0,.1),  
                                         'beta0_rv': dists.Gamma(1,.1),
-                                        'beta1_rv': dists.Gamma(1,10),})
+                                        #'beta0': dists.TruncatedNormal(0.0, 2.0, -8.0, 8.0),
+                                        'beta1_rv': dists.Gamma(1,10)})
+# new t-dist one
+def realrech_2lstm_tdist_prior():
+    return dists.StructDist({
+        # Copy all parameters from realrech_2lstm_prior
+        'v0f': dists.Normal(0,.1),
+        'v1f': dists.Normal(0,.1),
+        'v2f': dists.Normal(0,.1),
+        'v3f': dists.Normal(0,.1),
+        'wf': dists.Normal(0,.1),
+        'bf': dists.Normal(0,.1),
+        'v0i': dists.Normal(0,.1),
+        'v1i': dists.Normal(0,.1),
+        'v2i': dists.Normal(0,.1),
+        'v3i': dists.Normal(0,.1),
+        'wi': dists.Normal(0,.1),
+        'bi': dists.Normal(0,.1),
+        'v0o': dists.Normal(0,.1),
+        'v1o': dists.Normal(0,.1),
+        'v2o': dists.Normal(0,.1),
+        'v3o': dists.Normal(0,.1),
+        'wo': dists.Normal(0,.1),
+        'bo': dists.Normal(0,.1), 
+        'v0d': dists.Normal(0,.1),
+        'v1d': dists.Normal(0,.1),
+        'v2d': dists.Normal(0,.1),
+        'v3d': dists.Normal(0,.1),
+        'wd': dists.Normal(0,.1),
+        'bd': dists.Normal(0,.1),  
+        'beta0': dists.TruncatedNormal(0.0, 1.0, -3.0,  3.0),
+        #'beta1': dists.Gamma(1,10),
+        'beta1': dists.Gamma(2, 5),
+        'beta': dists.Uniform(0,1),                                   
+        'gamma': dists.Beta(2,5),
+        'xi': dists.Gamma(1,1),
+        'phi': dists.Gamma(1,1),
+        'tau1': dists.Normal(0,.1),
+        'tau2': dists.Normal(0,.1),
+        'sigmau2': dists.Gamma(1,5),
+        'v0f_rv': dists.Normal(0,.1),
+        'v1f_rv': dists.Normal(0,.1),
+        'v2f_rv': dists.Normal(0,.1),
+        'v3f_rv': dists.Normal(0,.1),
+        'wf_rv': dists.Normal(0,.1),
+        'bf_rv': dists.Normal(0,.1),
+        'v0i_rv': dists.Normal(0,.1),
+        'v1i_rv': dists.Normal(0,.1),
+        'v2i_rv': dists.Normal(0,.1),
+        'v3i_rv': dists.Normal(0,.1),
+        'wi_rv': dists.Normal(0,.1),
+        'bi_rv': dists.Normal(0,.1),
+        'v0o_rv': dists.Normal(0,.1),
+        'v1o_rv': dists.Normal(0,.1),
+        'v2o_rv': dists.Normal(0,.1),
+        'v3o_rv': dists.Normal(0,.1),
+        'wo_rv': dists.Normal(0,.1),
+        'bo_rv': dists.Normal(0,.1), 
+        'v0d_rv': dists.Normal(0,.1),
+        'v1d_rv': dists.Normal(0,.1),
+        'v2d_rv': dists.Normal(0,.1),
+        'v3d_rv': dists.Normal(0,.1),
+        'wd_rv': dists.Normal(0,.1),
+        'bd_rv': dists.Normal(0,.1),  
+        'beta0_rv': dists.Gamma(1,.1),
+        #'beta0': dists.TruncatedNormal(0.0, 2.0, -8.0, 8.0)
+        'beta1_rv': dists.Gamma(1,10),
+        #'beta1': dists.Gamma(2, 5),
+        
+        # Add t-distribution parameters
+        'nu': dists.Gamma(2.0, 0.1),  # df for returns
+        'df_u': dists.Gamma(2.0, 0.1)  # df for realized variance
+    })
 
 def realrech_5h_prior(n):
     return dists.StructDist({'beta': dists.Uniform(0,1),                                     

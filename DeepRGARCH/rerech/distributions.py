@@ -5,6 +5,7 @@ import numpy as np
 import numpy.random as random
 import scipy.stats as stats
 from scipy.linalg import cholesky, solve_triangular, inv
+from scipy.stats import truncnorm
 
 HALFLOG2PI = 0.5 * np.log(2. * np.pi)
 
@@ -795,9 +796,31 @@ class StructDist(ProbDist):
             out[par] = cond_law.rvs(size=size)
         return out
 
-    def ppf(self, theta):
+    def ppf(self, theta, size=1):
+    # allocate an empty structured array of length `size`
         out = np.empty(size, dtype=self.dtype)
+
         for par, law in self.laws.items():
             cond_law = law(out) if callable(law) else law
-            out[par] = cond_law.ppf(theta[par])
+            # draw the param‐wise quantiles
+            out[par] = cond_law.ppf(theta[par], size=size)
+
         return out
+
+# in DeepRGARCH/rerech/distributions.py
+
+
+class TruncatedNormal:
+    def __init__(self, lower, upper, mu=0.0, sigma=1.0):
+        a = (lower - mu) / sigma
+        b = (upper - mu) / sigma
+        self._dist = truncnorm(a, b, loc=mu, scale=sigma)
+        # … BUT YOU ALSO NEED :
+        self.dim   = 1
+        self.dtype = np.float64
+
+    def logpdf(self, x):
+        return self._dist.logpdf(x)
+
+    def rvs(self, size=None, random_state=None):
+        return self._dist.rvs(size=size, random_state=random_state)
